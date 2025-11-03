@@ -15,7 +15,7 @@ from openai import OpenAI
 
 # 页面配置
 st.set_page_config(
-    page_title="🃏 德州扑克战绩分析师 🃏",
+    page_title="🃏 德州扑克战绩分析师v2 🃏",
     page_icon="🃏",
     layout="wide",
     initial_sidebar_state="expanded"
