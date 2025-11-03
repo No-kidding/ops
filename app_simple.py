@@ -55,30 +55,51 @@ def call_qianwen_api(image_base64, api_key):
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         )
         
-        prompt = """请分析这张游戏排行榜截图，提取以下信息并以JSON格式返回：
+        prompt = """请仔细分析这张游戏排行榜截图，严格按照以下要求提取信息并以标准JSON格式返回：
 
 {
     "game_time": "比赛时间（格式：6-20 20:26 或 类似格式，必须包含日期和具体时间）",
     "total_hands": 总手数（数字），
     "players": [
         {
-            "name": "玩家昵称",
-            "score": 数字分数（正数或负数），
-            "hands": 该玩家的手数（数字），
-            "buyin": 该玩家的带入金额（数字，如果没有显示则为0）
+            "name": "玩家昵称（去除排名数字）",
+            "score": 数字分数（必须为整数，注意正负号），
+            "hands": 该玩家的手数（必须为整数），
+            "buyin": 该玩家的带入金额（必须为整数，如果没有显示则为0）
         }
     ]
 }
 
-要求：
-1. 仔细识别每个玩家的昵称，去除排名数字
-2. 准确提取每个玩家的战绩分数，注意正负号
-3. 提取每个玩家的手数信息
-4. 提取每个玩家的带入金额（如果图片中有显示）
-5. 提取游戏的总手数
-6. 比赛时间必须精确到分钟，用于区分不同场次
-7. 如果分数、手数、带入有逗号分隔符，请去除
-8. 只返回JSON格式的数据，不要其他说明文字"""
+**重要提取规则：**
+1. 严格按表格顺序提取，不要遗漏任何玩家
+2. 玩家昵称：去除排名数字（如"1."、"2."等），保留真实昵称
+3. 分数：必须是整数，包含正负号，去除千分位分隔符（如"1,234" -> 1234）
+4. 手数：必须是整数，去除千分位分隔符
+5. 带入金额：必须是整数，去除千分位分隔符
+6. 总手数：必须是整数
+7. 时间：必须包含日期和时间，精确到分钟
+8. **验证规则**：确保所有数字都是整数，没有小数点，没有非数字字符
+9. **格式要求**：只返回有效的JSON格式，不要其他说明文字
+
+**示例格式：**
+{
+    "game_time": "6-20 20:26",
+    "total_hands": 150,
+    "players": [
+        {
+            "name": "Player1",
+            "score": 1200,
+            "hands": 45,
+            "buyin": 1000
+        },
+        {
+            "name": "Player2",
+            "score": -800,
+            "hands": 38,
+            "buyin": 1000
+        }
+    ]
+}"""
 
         completion = client.chat.completions.create(
             model="qwen-vl-plus",
@@ -97,8 +118,8 @@ def call_qianwen_api(image_base64, api_key):
                     ]
                 }
             ],
-            temperature=0.1,
-            max_tokens=2000
+            temperature=0.0,  # 更低温度以获得更一致的结果
+            max_tokens=2500
         )
         
         content = completion.choices[0].message.content
@@ -112,28 +133,63 @@ def call_qianwen_api(image_base64, api_key):
                 return None
         
         try:
-            json_start = content.find('{')
-            json_end_pos = content.rfind('}')
-            
-            if json_start == -1 or json_end_pos == -1:
+            # 尝试多种JSON提取方法
+            json_str = extract_json_from_response(content)
+            if json_str:
+                parsed_data = json.loads(json_str)
+                return parsed_data
+            else:
                 return None
-            
-            if json_start >= json_end_pos:
-                return None
-            
-            json_str = content[json_start:json_end_pos + 1]
-            
-            if not json_str.strip():
-                return None
-            
-            parsed_data = json.loads(json_str)
-            return parsed_data
         except (json.JSONDecodeError, ValueError):
             return None
             
     except Exception as e:
         st.error(f"API调用错误: {e}")
         return None
+
+def extract_json_from_response(response_text):
+    """从API响应中提取JSON字符串"""
+    # 方法1：直接查找JSON结构
+    try:
+        json_start = response_text.find('{')
+        json_end_pos = response_text.rfind('}')
+        
+        if json_start != -1 and json_end_pos != -1 and json_start < json_end_pos:
+            json_str = response_text[json_start:json_end_pos + 1]
+            # 验证是否为有效JSON
+            json.loads(json_str)
+            return json_str
+    except:
+        pass
+    
+    # 方法2：使用正则表达式查找JSON结构
+    try:
+        # 查找完整的JSON对象
+        import re
+        json_match = re.search(r'\{(?:[^{}]|(?R))*\}', response_text)
+        if json_match:
+            json_str = json_match.group()
+            json.loads(json_str)
+            return json_str
+    except:
+        pass
+    
+    # 方法3：查找数组结构
+    try:
+        arr_start = response_text.find('[')
+        arr_end_pos = response_text.rfind(']')
+        
+        if arr_start != -1 and arr_end_pos != -1 and arr_start < arr_end_pos:
+            arr_str = response_text[arr_start:arr_end_pos + 1]
+            json.loads(arr_str)
+            # 如果是数组，尝试包装成完整对象
+            wrapped = f'{{"players": {arr_str}}}'
+            json.loads(wrapped)
+            return wrapped
+    except:
+        pass
+    
+    return None
 
 def validate_player_data(name, score, hands=0, buyin=0):
     """验证玩家数据是否完整有效"""
@@ -155,7 +211,7 @@ def validate_player_data(name, score, hands=0, buyin=0):
     try:
         score_num = int(float(score))
     except (ValueError, TypeError):
-        return False, "分数格式错误"
+        return False, f"分数格式错误: {score}"
     
     # 验证手数
     try:
@@ -163,7 +219,7 @@ def validate_player_data(name, score, hands=0, buyin=0):
         if hands_num < 0:
             return False, "手数不能为负数"
     except (ValueError, TypeError):
-        return False, "手数格式错误"
+        return False, f"手数格式错误: {hands}"
     
     # 验证带入
     try:
@@ -171,7 +227,7 @@ def validate_player_data(name, score, hands=0, buyin=0):
         if buyin_num < 0:
             return False, "带入不能为负数"
     except (ValueError, TypeError):
-        return False, "带入格式错误"
+        return False, f"带入格式错误: {buyin}"
     
     return True, ""
 
@@ -204,12 +260,23 @@ def extract_game_info_with_qianwen(image, api_key):
                 is_valid, error_msg = validate_player_data(name, score, hands, buyin)
                 
                 if is_valid:
-                    cleaned_players.append({
+                    cleaned_player = {
                         "name": name,
                         "score": int(score),
                         "hands": int(hands) if hands else 0,
                         "buyin": int(buyin) if buyin else 0
-                    })
+                    }
+                    # 额外验证，确保数值在合理范围内
+                    if abs(cleaned_player["score"]) <= 10000000:  # 假设分数不超过千万
+                        cleaned_players.append(cleaned_player)
+                    else:
+                        skipped_players.append({
+                            "name": name,
+                            "score": score,
+                            "hands": hands,
+                            "buyin": buyin,
+                            "error": f"分数异常: {score}"
+                        })
                 else:
                     skipped_players.append({
                         "name": name,
@@ -233,6 +300,7 @@ def extract_game_info_with_qianwen(image, api_key):
                 "raw_response": result
             }
         else:
+            st.warning("API未返回有效的玩家数据")
             return None
             
     except Exception as e:
@@ -258,8 +326,22 @@ def parse_number_string(num_str):
         return int(num_str)  # 确保返回 int
     
     try:
-        num_str = str(num_str).replace(',', '').replace(' ', '')
-        return int(float(num_str))
+        # 移除千分位分隔符和空格
+        num_str = str(num_str).replace(',', '').replace(' ', '').replace('，', '')
+        
+        # 处理负号
+        if num_str.startswith('-'):
+            sign = -1
+            num_str = num_str[1:]
+        elif num_str.startswith('+'):
+            sign = 1
+            num_str = num_str[1:]
+        else:
+            sign = 1
+        
+        # 转换为数字
+        result = int(float(num_str))
+        return sign * result
     except (ValueError, TypeError):
         return 0
 
@@ -571,6 +653,10 @@ def process_single_image(uploaded_file, container):
                         
                     else:
                         st.error(f"❌ 解析失败或无有效数据")
+                        # 显示原始响应用于调试
+                        if game_info:
+                            with st.expander("原始API响应"):
+                                st.json(game_info.get('raw_response', {}))
                         
             except Exception as e:
                 st.error(f"处理出错: {e}")
@@ -760,4 +846,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
